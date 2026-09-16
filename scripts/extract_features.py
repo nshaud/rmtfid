@@ -12,7 +12,7 @@ from torch.types import Tensor
 import torchvision
 from torchvision import transforms
 from torchvision.datasets import VisionDataset
-import torchvision.transforms.functional as F
+import torchvision.transforms.v2.functional as F
 
 from datasets import load_dataset
 
@@ -173,6 +173,11 @@ def extract_features_from_dataset(
                 batch = batch[0]
             elif isinstance(batch, dict):
                 batch = batch["image"]
+
+            # Duplicate gray to RGB if needed
+            n_channels = batch.shape[1]
+            if n_channels == 1:
+                batch = F.grayscale_to_rgb(batch)
 
             # Move to GPU if available
             if cuda:
