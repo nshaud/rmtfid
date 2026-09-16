@@ -5,8 +5,15 @@ from scipy import linalg
 from numpy.typing import NDArray
 from torch.types import Tensor
 
+def compute_statistics(feats: NDArray) -> tuple[NDArray, NDArray]:
+    """
+    Compute the mean and covariance of the features.
+    """
+    mu = np.mean(feats, axis=0)
+    sig = np.cov(feats, rowvar=False)
+    return mu, sig
 
-def frechet_distance(
+def _frechet_distance(
     mu1: NDArray, sigma1: NDArray, mu2: NDArray, sigma2: NDArray, eps: float = 1e-6
 ) -> float:
     """
@@ -28,7 +35,7 @@ def frechet_distance(
 
     sigma1, sigma2 : (p, p) array-like
         Empirical covariance matrices of the two distributions.
-    
+
     --------------------------------------------------------------------------
     Returns
     --------------------------------------------------------------------------
@@ -72,6 +79,34 @@ def frechet_distance(
     return diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean
 
 
+def _efficient_frechet_distance(
+    mu1: NDArray, sigma1: NDArray, mu2: NDArray, sigma2: NDArray, eps: float = 1e-6
+) -> float:
+    """
+    Using a nice trick from /u/donshell on reddit
+    https://old.reddit.com/r/MachineLearning/comments/12hv2u6/d_a_better_way_to_compute_the_fr%C3%A9chet_inception/
+    > Recall that 1) trace(A) equals the sum of A's eigenvalues and 2) the eigenvalues of sqrt(A) are
+    > the square-roots of the eigenvalues of A. Then trace(sqrt(A)) is the sum of square-roots of the
+    > eigenvalues of A. Hence, instead of the full square-root we can only compute the eigenvalues of A.
+
+    Efficient implementation that gives the same result as _frechet_distance, but is faster and more memory efficient.
+    """
+    sqrt_trace = np.real(linalg.eigvals(sigma1 @ sigma2) ** 0.5).sum()
+    return ((mu1 - mu2) ** 2).sum() + sigma1.trace() + sigma2.trace() - 2 * sqrt_trace
+
+
+def frechet_distance(
+    mu1: NDArray, sigma1: NDArray, mu2: NDArray, sigma2: NDArray, efficient: bool = True
+) -> float:
+    """
+    Wrapper function for the Frechet distance that uses the efficient implementation.
+    """
+    if efficient:
+        return _efficient_frechet_distance(mu1, sigma1, mu2, sigma2)
+    else:
+        return _frechet_distance(mu1, sigma1, mu2, sigma2)
+
+
 def frechet_distance_torch(
     mu1: Tensor, sigma1: Tensor, mu2: Tensor, sigma2: Tensor
 ) -> Tensor:
@@ -92,7 +127,7 @@ def frechet_distance_torch(
 
     sigma1, sigma2 : (p, p) array-like
         Empirical covariance matrices of the two distributions.
-    
+
     --------------------------------------------------------------------------
     Returns
     --------------------------------------------------------------------------
@@ -107,8 +142,8 @@ def frechet_distance_torch(
 
 
 def fid_from_feats(feats1: NDArray, feats2: NDArray) -> float:
-    mu1, sig1 = np.mean(feats1, axis=0), np.cov(feats1, rowvar=False)
-    mu2, sig2 = np.mean(feats2, axis=0), np.cov(feats2, rowvar=False)
+    mu1, sig1 = compute_statistics(feats1)
+    mu2, sig2 = compute_statistics(feats2)
     return frechet_distance(mu1, sig1, mu2, sig2)
 
 

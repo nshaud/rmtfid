@@ -4,7 +4,9 @@ import torch
 from scipy import linalg
 
 from torch.types import Tensor
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import NDArray
+
+from .fid import compute_statistics
 
 
 def rmt_frechet_distance_analytical(
@@ -77,8 +79,8 @@ def rmt_frechet_distance_analytical(
 
 def rmt_fid_from_feats(feats1: NDArray, feats2: NDArray) -> float:
     assert len(feats1) == len(feats2)
-    mu1, sig1 = np.mean(feats1, axis=0), np.cov(feats1, rowvar=False)
-    mu2, sig2 = np.mean(feats2, axis=0), np.cov(feats2, rowvar=False)
+    mu1, sig1 = compute_statistics(feats1)
+    mu2, sig2 = compute_statistics(feats2)
     return rmt_frechet_distance_analytical(mu1, sig1, mu2, sig2, len(feats1))
 
 

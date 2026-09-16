@@ -4,8 +4,7 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from numpy.typing import NDArray
 
-from .fid import fid_from_feats
-
+from .fid import frechet_distance, compute_statistics
 
 # Implementation adapted from https://github.com/mchong6/FID_IS_infinity/blob/master/score_infinity.py
 def fid_infinity_from_feats(
@@ -13,11 +12,17 @@ def fid_infinity_from_feats(
     synthetic_feats: NDArray,
     num_points: int = 15,
     min_samples: int = 5000,
+    seed: int | None = None,
     plot: bool = False,
+    progress: bool = False,
 ) -> float:
     """
     Calculates the (unbiased) FID infinity by extrapolating the FID values
     at different number of samples.
+
+    From Chong & Forsyth https://arxiv.org/abs/1911.07023
+    Implementation based on the dgm-eval repo from Stein et al.
+    https://github.com/layer6ai-labs/dgm-eval/blob/master/dgm_eval/metrics/fd.py
     --------------------------------------------------------------------------
     Parameters:
     --------------------------------------------------------------------------
@@ -36,8 +41,13 @@ def fid_infinity_from_feats(
             Minimum number of samples to evaluate FID N.
             Default: p + 1, where p is the dimension of the features.
             (original implementation uses 5000, but this is too high for small datasets)
+        seed: (int)
+            Optional seed for reproducible runs when sampling FID N batches.
         plot: (bool)
             Set to True to plot the FID_N values and the fitted line with matplotlib.
+            Default: False
+        progress: (bool)
+            Set to True to display a progress bar.
             Default: False
 
     --------------------------------------------------------------------------
@@ -52,27 +62,42 @@ def fid_infinity_from_feats(
         len(reference_feats), len(synthetic_feats)
     ), f"min_samples ({min_samples}) must be less than the number of samples in both feature sets (found {len(reference_feats)}, {len(synthetic_feats)})"
 
+
     fid_values = []
 
     # Choose the number of samples to evaluate FID_N at regular intervals over N
-    n_samples = np.linspace(min_samples, len(synthetic_feats), num_points).astype(
-        "int32"
-    )
+    n_samples = np.linspace(
+        min(min_samples, max(len(synthetic_feats) // 10, 2)), len(synthetic_feats), num_points
+    ).astype("int32")
 
-    n_samples = np.unique(n_samples)  # Remove duplicates and warn if there are any
+    # Remove duplicates and warn if there are any
+    # this can happen on very small datasets
+    n_samples = np.unique(n_samples)  
     if len(n_samples) < num_points:
         print(
             f"Warning: fewer than {num_points} unique sample sizes found. Using {len(n_samples)} unique sample sizes instead."
         )
 
+
+    # Precompute the reference statistics (mean and covariance) for the real dataset
+    mu_ref, sigma_ref = compute_statistics(reference_feats)
+
+    if progress:
+        try:
+            from tqdm.auto import tqdm
+            pbar = tqdm(total=num_points, desc='FID-infinity batches')
+        except ImportError:
+            print("progress cannot be displayed as tqdm could not be imported")
+            pbar = None
+
+    rng = np.random.default_rng(seed)
     # Evaluate FID_N
     for n in n_samples:
-        # sample with replacement
-        np.random.shuffle(synthetic_feats)
-        feats_n = synthetic_feats[:n]
-        fid_n = fid_from_feats(feats_n, reference_feats)
+        # Sample n features from the synthetic dataset
+        feats_n = rng.choice(synthetic_feats, n, replace=False)
+        mu_n, sigma_n = compute_statistics(feats_n)
+        fid_n = frechet_distance(mu_ref, sigma_ref, mu_n, sigma_n)
         fid_values.append(fid_n)
-    fid_values = np.array(fid_values).reshape(-1, 1)
 
     # Reshape for linear regression
     n_samples = np.array(n_samples).reshape(-1, 1)
