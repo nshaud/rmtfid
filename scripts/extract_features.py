@@ -14,6 +14,8 @@ from torchvision import transforms
 from torchvision.datasets import VisionDataset
 import torchvision.transforms.functional as F
 
+from datasets import load_dataset
+
 from torch_fidelity.registry import FEATURE_EXTRACTORS_REGISTRY
 from torch_fidelity.feature_extractor_base import FeatureExtractorBase
 from torch_fidelity.utils import (
@@ -169,6 +171,8 @@ def extract_features_from_dataset(
             # Ignore labels if present (e.g., in ImageFolder)
             if isinstance(batch, (list, tuple)):
                 batch = batch[0]
+            elif isinstance(batch, dict):
+                batch = batch["image"]
 
             # Move to GPU if available
             if cuda:
@@ -213,7 +217,7 @@ def extract_features_from_dataset(
     type=str,
     required=False,
     help="Torchvision dataset name (e.g., 'CIFAR10', 'MNIST'). \
-          Split can be provided as 'CIFAR10/train' or 'CIFAR10/test'. \
+          Split can be provided as 'CIFAR10:train' or 'CIFAR10:test'. \
           Use train split by default.",
 )
 @click.option(
@@ -223,6 +227,15 @@ def extract_features_from_dataset(
     help="Root directory for torchvision datasets. \
           If not provided, the current directory will be used.",
 )
+@click.option(
+    "--hf-dataset",
+    type=str,
+    required=False,
+    help="HuggingFace dataset name (e.g., 'cassiekang/cub200_dataset'). \
+          Split can be provided as 'cassiekang/cub200_dataset:train' or 'cassiekang/cub200_dataset:test'. \
+          Use train split by default.",
+)
+
 @click.option(
     "--s3-bucket",
     type=str,
@@ -256,6 +269,7 @@ def extract_features(
     folder: Optional[Path] = None,
     torchvision_dataset: Optional[str] = None,
     torchvision_root: Optional[Path] = None,
+    hf_dataset: Optional[str] = None,
     s3_bucket: Optional[str] = None,
     s3_endpoint: Optional[str] = None,
     batch_size: int = 32,
@@ -275,14 +289,27 @@ def extract_features(
         dataset = SimpleImageFolder(folder)
     elif torchvision_dataset:
         name, split = (
-            torchvision_dataset.split("/")
-            if "/" in torchvision_dataset
+            torchvision_dataset.split(":")
+            if ":" in torchvision_dataset
             else (torchvision_dataset, "train")
         )
         # Load images from torchvision dataset
-        dataset = torchvision.datasets.__dict__[name](
-            root=torchvision_root or ".", train=split, download=True, transform=transforms.PILToTensor()
+        try:
+            dataset = torchvision.datasets.__dict__[name](
+                root=torchvision_root or ".", split=split, download=True, transform=transforms.PILToTensor()
+            )
+        except TypeError: # maybe this dataset uses "train : bool = True" instead of "split"
+            dataset = torchvision.datasets.__dict__[name](
+                root=torchvision_root or ".", train=(split == "train"), download=True, transform=transforms.PILToTensor()
+            )
+    elif hf_dataset:
+        name, split = (
+            hf_dataset.split(":")
+            if ":" in hf_dataset
+            else (hf_dataset, "train")
         )
+        # Load images from HuggingFace dataset
+        dataset = load_dataset(name).with_format("torch")[split]
     elif s3_bucket and s3_endpoint:
         # Load images from S3 bucket
         dataset = MinIODataset(s3_endpoint, s3_bucket)
