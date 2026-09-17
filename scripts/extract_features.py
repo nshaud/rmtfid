@@ -12,7 +12,7 @@ from torch.types import Tensor
 import torchvision
 from torchvision import transforms
 from torchvision.datasets import VisionDataset
-import torchvision.transforms.v2.functional as F
+from torchvision.transforms.v2 import Compose, PILToTensor
 
 from datasets import load_dataset
 
@@ -27,6 +27,20 @@ from torch_fidelity.utils import (
 BACKBONES = list(FEATURE_EXTRACTORS_REGISTRY.keys())
 
 
+class PILToRGBTransform(torch.nn.Module):
+    """
+    Custom transform to convert a PIL image into RGB
+
+    This allows us to deal with grayscale, CMYK or RGBA images (as happens in ImageNet)
+    """
+
+    def forward(self, img):
+        if isinstance(img, list):
+            return [im.convert("RGB") for im in img]
+        else:
+            return img.convert("RGB")
+
+
 class SimpleImageFolder(Dataset):
     """
     Dataset subclass that reads all images from a local folder.
@@ -34,15 +48,18 @@ class SimpleImageFolder(Dataset):
     Args:
         folder: path to the folder to read from
         extensions: allowed file extensions (default: .png, .jpg)
+        transform: custom torchvision.transform to apply
     """
 
     def __init__(
         self,
         folder: Path | str,
         extensions: List[str] = [".png", ".jpg"],
+        transform=None,
     ):
         self.folder = Path(folder)
         self.extensions = extensions
+        self.t = transform
 
         # List all files in the folder and filter by extension
         self.filelist = [
@@ -58,8 +75,11 @@ class SimpleImageFolder(Dataset):
         filename = self.filelist[idx]
         im = Image.open(filename)
         im.load()
-        # Convert to torch.Tensor
-        return F.pil_to_tensor(im)
+        if self.t:
+            return self.t(im)
+        else:
+            return im
+
 
 class MinIODataset(Dataset):
     """
@@ -69,6 +89,7 @@ class MinIODataset(Dataset):
         s3_endpoint_url: URL to the S3 endpoint
         s3_bucket: path to the bucket to read from
         extensions: allowed file extensions (default: .png, .jpg)
+        transform: custom torchvision.transform to apply
     """
 
     def __init__(
@@ -76,6 +97,7 @@ class MinIODataset(Dataset):
         s3_endpoint_url: str,
         s3_bucket: Path | str,
         extensions: List[str] = [".png", ".jpg"],
+        transform=None,
     ):
         self.s3_endpoint = s3_endpoint_url
         self.extensions = extensions
@@ -90,6 +112,8 @@ class MinIODataset(Dataset):
 
         # Remove fs object for fork-safe multiprocessing
         self.fs = None
+
+        self.t = transform
 
     def _list_files(self):
         # Helper function to list allowed files in the bucket
@@ -117,8 +141,12 @@ class MinIODataset(Dataset):
         with self._get_fs().open(filename, "rb") as f:
             im = Image.open(f)
             im.load()
-        # Convert to torch.Tensor
-        return F.pil_to_tensor(im)
+        # Apply transform if set
+        if self.t:
+            return self.t(im)
+        else:
+            return im
+
 
 # Modified from torch-fidelity
 def extract_features_from_dataset(
@@ -131,7 +159,7 @@ def extract_features_from_dataset(
 ) -> Tensor:
     """
     Extract features from a dataset using a feature extractor.
-    
+
     Args:
         input: Dataset to extract features from. Can be a SimpleImageFolder, MinIODataset, or a torchvision VisionDataset.
         feat_extractor: torch-fidelity backbone model to use for feature extraction.
@@ -145,7 +173,6 @@ def extract_features_from_dataset(
              with N being the number of samples and D the feature dimension.
     """
 
-    
     if batch_size > len(input):
         batch_size = len(input)
 
@@ -167,17 +194,11 @@ def extract_features_from_dataset(
         desc="Processing samples",
     ) as t, torch.no_grad():
         for bid, batch in enumerate(dataloader):
-
             # Ignore labels if present (e.g., in ImageFolder)
             if isinstance(batch, (list, tuple)):
                 batch = batch[0]
             elif isinstance(batch, dict):
                 batch = batch["image"]
-
-            # Duplicate gray to RGB if needed
-            n_channels = batch.shape[1]
-            if n_channels == 1:
-                batch = F.grayscale_to_rgb(batch)
 
             # Move to GPU if available
             if cuda:
@@ -240,7 +261,6 @@ def extract_features_from_dataset(
           Split can be provided as 'cassiekang/cub200_dataset:train' or 'cassiekang/cub200_dataset:test'. \
           Use train split by default.",
 )
-
 @click.option(
     "--s3-bucket",
     type=str,
@@ -289,9 +309,13 @@ def extract_features(
         backbone (str): Backbone model to use for feature extraction, as provided by torch-fidelity.
         filename (str): Path to the output file where extracted features will be saved.
     """
+
+    # Transform to RGB + torch.Tensor
+    t = Compose([PILToRGBTransform(), PILToTensor()])
+
     if folder:
         # Load images from local folder
-        dataset = SimpleImageFolder(folder)
+        dataset = SimpleImageFolder(folder, transform=t)
     elif torchvision_dataset:
         name, split = (
             torchvision_dataset.split(":")
@@ -301,23 +325,33 @@ def extract_features(
         # Load images from torchvision dataset
         try:
             dataset = torchvision.datasets.__dict__[name](
-                root=torchvision_root or ".", split=split, download=True, transform=transforms.PILToTensor()
+                root=torchvision_root or ".", split=split, download=True, transform=t
             )
-        except TypeError: # maybe this dataset uses "train : bool = True" instead of "split"
+        except (
+            TypeError
+        ):  # maybe this dataset uses "train : bool = True" instead of "split"
             dataset = torchvision.datasets.__dict__[name](
-                root=torchvision_root or ".", train=(split == "train"), download=True, transform=transforms.PILToTensor()
+                root=torchvision_root or ".",
+                train=(split == "train"),
+                download=True,
+                transform=t,
             )
     elif hf_dataset:
         name, split = (
-            hf_dataset.split(":")
-            if ":" in hf_dataset
-            else (hf_dataset, "train")
+            hf_dataset.split(":") if ":" in hf_dataset else (hf_dataset, "train")
         )
+
+        def hf_transform(hf_dict):
+            img = hf_dict["image"]
+            hf_dict["image"] = t.forward(img)
+            return hf_dict
+
         # Load images from HuggingFace dataset
-        dataset = load_dataset(name).with_format("torch")[split]
+        dataset = load_dataset(name)[split]
+        dataset.set_transform(hf_transform)
     elif s3_bucket and s3_endpoint:
         # Load images from S3 bucket
-        dataset = MinIODataset(s3_endpoint, s3_bucket)
+        dataset = MinIODataset(s3_endpoint, s3_bucket, transform=t)
     else:
         raise ValueError(
             "Either --folder, --torchvision-dataset, or both --s3-bucket and --s3-endpoint must be provided."
